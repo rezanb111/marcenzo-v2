@@ -1,0 +1,17 @@
+[Unit]
+Description=MARCENZO Loan Bot
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/marcenzo-loan-bot
+Environment=PATH=/root/marcenzo-loan-bot/venv/bin
+ExecStart=/root/marcenzo-loan-bot/venv/bin/python main.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
