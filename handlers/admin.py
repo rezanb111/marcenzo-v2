@@ -8,13 +8,13 @@ from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from sqlalchemy import select, func, update
+from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
 from loguru import logger
 
 from database.session import async_session
-from database.models import User, Loan, SupportTicket, PromoCode
-from services.loan_service import approve_and_disburse, reject_loan, level_title
+from database.models import User, Loan, SupportTicket
+from services.loan_service import approve_loan, reject_loan, level_title
 from services.polygon_pay import polygon_pay
 from services.tasks import set_maintenance_mode, is_maintenance_mode, send_admin_report
 from keyboards.inline import admin_panel_kb, pending_loan_admin_kb, back_main_kb, cancel_kb
@@ -128,19 +128,22 @@ async def admin_approve(cb: CallbackQuery, bot: Bot):
             await safe_edit(cb, "Loan not pending.", reply_markup=admin_panel_kb())
             return
         try:
-            tx_hash = await approve_and_disburse(session, loan)
-            await safe_edit(cb, f"✅ Approved & disbursed.\nTX: <code>{tx_hash}</code>", reply_markup=admin_panel_kb())
-            try:
-                await bot.send_message(
-                    loan.user.telegram_id,
-                    f"✅ Loan #{loan.id} approved!\n{loan.amount} USDT sent to your wallet.\nTX: <code>{tx_hash}</code>",
-                    parse_mode="HTML",
-                )
-            except Exception as e:
-                logger.warning(f"Notify user: {e}")
+            ok, msg = await approve_loan(session, loan, loan.user)
+            if ok:
+                await safe_edit(cb, f"✅ Approved & disbursed.\nTX: <code>{msg}</code>", reply_markup=admin_panel_kb())
+                try:
+                    await bot.send_message(
+                        loan.user.telegram_id,
+                        f"✅ Loan #{loan.id} approved!\n{loan.amount} USDT sent to your wallet.\nTX: <code>{msg}</code>",
+                        parse_mode="HTML",
+                    )
+                except Exception as e:
+                    logger.warning(f"Notify user: {e}")
+            else:
+                await safe_edit(cb, f"❌ Disburse failed: {msg}", reply_markup=pending_loan_admin_kb(loan_id))
         except Exception as e:
             logger.exception("Approve failed")
-            await safe_edit(cb, f"❌ Disburse failed: {e}", reply_markup=pending_loan_admin_kb(loan_id))
+            await safe_edit(cb, f"❌ Error: {e}", reply_markup=pending_loan_admin_kb(loan_id))
 
 
 @router.callback_query(F.data.startswith("admin:reject:"))
@@ -330,7 +333,7 @@ async def admin_broadcast_start(cb: CallbackQuery, state: FSMContext):
 
 @router.message(AdminStates.broadcast)
 async def admin_broadcast_send(message: Message, state: FSMContext, bot: Bot):
-    text = message.text or message.html_text or ""
+    text = message.html_text or message.text or ""
     await state.clear()
     async with async_session() as session:
         result = await session.execute(select(User.telegram_id).where(User.is_blocked == False))
@@ -387,7 +390,8 @@ async def admin_tickets(cb: CallbackQuery):
             return
         lines = ["🎫 <b>Open Tickets</b>\n"]
         for tkt in tickets:
-            lines.append(f"#{tkt.id} | {tkt.subject[:40]} | user_id={tkt.user_id}")
+            subj = (tkt.subject or "")[:40]
+            lines.append(f"#{tkt.id} | {subj} | user_id={tkt.user_id}")
         await safe_edit(cb, "\n".join(lines), reply_markup=admin_panel_kb())
 
 
@@ -423,12 +427,14 @@ async def admin_promo_amount(message: Message, state: FSMContext):
         return
     data = await state.get_data()
     code = data["promo_code"]
-    async with async_session() as session:
-        try:
+    await state.clear()
+    try:
+        from database.models import PromoCode
+        async with async_session() as session:
             promo = PromoCode(code=code, bonus_amount=amount, max_uses=100, used_count=0, is_active=True)
             session.add(promo)
             await session.commit()
-            await message.answer(f"✅ Promo {code} = {amount} USDT", reply_markup=back_main_kb())
-        except Exception as e:
-            await message.answer(f"Failed: {e}")
-    await state.clear()
+        await message.answer(f"✅ Promo {code} = {amount} USDT", reply_markup=back_main_kb())
+    except Exception as e:
+        logger.warning(f"Promo save: {e}")
+        await message.answer(f"Promo noted: {code} = {amount} (optional model)\n{e}", reply_markup=back_main_kb())
