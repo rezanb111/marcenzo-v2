@@ -52,6 +52,12 @@ async def is_maintenance_mode() -> bool:
         return val == "1"
 
 
+async def set_maintenance_mode(enabled: bool) -> None:
+    async with async_session() as session:
+        await set_setting(session, "maintenance_mode", "1" if enabled else "0")
+    logger.info(f"Maintenance mode set to {enabled}")
+
+
 async def build_admin_report() -> str:
     async with async_session() as session:
         users = (await session.execute(select(func.count(User.id)))).scalar() or 0
