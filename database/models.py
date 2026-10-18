@@ -181,3 +181,15 @@ class ReferralReward(Base):
     bonus_amount: Mapped[float] = mapped_column(Float, default=0.5)
     reason: Mapped[str] = mapped_column(String(64), default="signup")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class AdminAuditLog(Base):
+    """Trail of sensitive admin actions for accountability."""
+    __tablename__ = "admin_audit_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    admin_telegram_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    action: Mapped[str] = mapped_column(String(64), nullable=False)
+    target: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    detail: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
