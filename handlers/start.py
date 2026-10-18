@@ -1,19 +1,19 @@
 """
-/start, captcha, terms, language, wallet binding, main menu entry.
+/start, captcha, terms, language, wallet binding, main menu, /help, /status.
 """
 from __future__ import annotations
 
 from datetime import datetime
 from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from sqlalchemy import select
+from sqlalchemy import select, func
 from loguru import logger
 
 from database.session import async_session
-from database.models import User
+from database.models import User, Loan
 from services.loan_service import get_or_create_user, level_title
 from services.security import generate_math_captcha, verify_password
 from keyboards.inline import main_menu_kb, language_kb, terms_kb
@@ -42,6 +42,54 @@ def is_admin(user: User | None, username: str | None, telegram_id: int) -> bool:
     return False
 
 
+@router.message(Command("help"))
+async def cmd_help(message: Message):
+    text = (
+        "📖 <b>MARCENZO Help</b>\n\n"
+        "/start — open main menu\n"
+        "/help — this message\n"
+        "/status — bot health (admins)\n\n"
+        "<b>How it works</b>\n"
+        "1. Bind your Polygon wallet\n"
+        "2. Request a loan within your credit limit\n"
+        "3. Admin approves → USDT sent on-chain\n"
+        "4. Repay each installment to its unique address\n"
+        "5. Successful repayments raise your level & limit\n\n"
+        f"Support: @{settings.SUPPORT_USERNAME}"
+    )
+    await message.answer(text, parse_mode="HTML")
+
+
+@router.message(Command("status"))
+async def cmd_status(message: Message):
+    if message.from_user.id not in settings.admin_ids:
+        uname = (message.from_user.username or "").lower()
+        if uname not in settings.admin_usernames:
+            await message.answer("Admins only.")
+            return
+    async with async_session() as session:
+        users = (await session.execute(select(func.count(User.id)))).scalar() or 0
+        pending = (await session.execute(select(func.count(Loan.id)).where(Loan.status == "PENDING"))).scalar() or 0
+        active = (await session.execute(select(func.count(Loan.id)).where(Loan.status == "ACTIVE"))).scalar() or 0
+    from services.tasks import is_maintenance_mode
+    maint = await is_maintenance_mode()
+    try:
+        from services.polygon_pay import polygon_pay
+        treasury = await polygon_pay.get_usdt_balance(settings.TREASURY_ADDRESS)
+    except Exception:
+        treasury = -1
+    await message.answer(
+        f"✅ <b>Bot online</b>\n"
+        f"Users: {users}\n"
+        f"Pending loans: {pending}\n"
+        f"Active loans: {active}\n"
+        f"Treasury: {treasury if treasury >= 0 else 'N/A'} USDT\n"
+        f"Maintenance: {'ON' if maint else 'OFF'}\n"
+        f"Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC",
+        parse_mode="HTML",
+    )
+
+
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext, bot: Bot):
     await state.clear()
@@ -49,7 +97,7 @@ async def cmd_start(message: Message, state: FSMContext, bot: Bot):
     if await is_maintenance_mode():
         uname = (message.from_user.username or "").lower()
         if uname not in settings.admin_usernames and message.from_user.id not in settings.admin_ids:
-            await message.answer("🛠 ربات موقتاً در حالت تعمیر است. لطفاً بعداً مراجعه کنید.")
+            await message.answer("🛠 Bot is under maintenance. Please try later.")
             return
 
     async with async_session() as session:
@@ -198,7 +246,7 @@ async def password_unlock(message: Message, state: FSMContext):
         result = await session.execute(select(User).where(User.id == data["user_id"]))
         user = result.scalar_one()
         lang = user.language or "en"
-        if verify_password(pwd, user.password_salt, user.password_hash):
+        if verify_password(pwd, user.password_salt or "", user.password_hash or ""):
             admin = is_admin(user, message.from_user.username, message.from_user.id)
             await state.clear()
             await message.answer(t("main_menu", lang), reply_markup=main_menu_kb(admin), parse_mode="HTML")
