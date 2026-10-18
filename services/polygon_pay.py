@@ -1,6 +1,7 @@
 """
 Polygon USDT payment service for MARCENZO Loan Bot.
 Deterministic unique deposit addresses + treasury disbursement + sweep.
+Compatible with web3.py v6 and v7.
 """
 from __future__ import annotations
 
@@ -11,10 +12,38 @@ from typing import Optional, Tuple
 from eth_account import Account
 from eth_account.signers.local import LocalAccount
 from web3 import Web3
-from web3.middleware import geth_poa_middleware
 from loguru import logger
 
 from config import settings
+
+
+def _inject_poa(w3: Web3) -> None:
+    """Polygon needs POA middleware; API changed between web3 v6 and v7."""
+    try:
+        from web3.middleware import ExtraDataToPOAMiddleware
+        w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
+        return
+    except Exception:
+        pass
+    try:
+        from web3.middleware import geth_poa_middleware
+        w3.middleware_onion.inject(geth_poa_middleware, layer=0)
+        return
+    except Exception:
+        pass
+    try:
+        from web3.middleware.proof_of_authority import ExtraDataToPOAMiddleware as POA
+        w3.middleware_onion.inject(POA, layer=0)
+    except Exception as e:
+        logger.warning(f"POA middleware not injected: {e}")
+
+
+def _raw_tx_bytes(signed) -> bytes:
+    """web3/eth-account: rawTransaction vs raw_transaction."""
+    raw = getattr(signed, "raw_transaction", None) or getattr(signed, "rawTransaction", None)
+    if raw is None:
+        raise RuntimeError("Signed transaction has no raw bytes")
+    return raw
 
 
 ERC20_ABI = [
@@ -48,7 +77,7 @@ ERC20_ABI = [
 class PolygonPayService:
     def __init__(self):
         self.w3 = Web3(Web3.HTTPProvider(settings.POLYGON_RPC_URL, request_kwargs={"timeout": 30}))
-        self.w3.middleware_onion.inject(geth_poa_middleware, layer=0)
+        _inject_poa(self.w3)
         self.usdt = self.w3.eth.contract(
             address=Web3.to_checksum_address(settings.USDT_CONTRACT),
             abi=ERC20_ABI,
@@ -114,11 +143,12 @@ class PolygonPayService:
                     "chainId": self.chain_id,
                 }
                 signed = self.treasury.sign_transaction(tx)
-                tx_hash = self.w3.eth.send_raw_transaction(signed.rawTransaction)
+                tx_hash = self.w3.eth.send_raw_transaction(_raw_tx_bytes(signed))
                 receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=120)
                 if receipt.status == 1:
-                    logger.info(f"Gas sent {amount_matic} MATIC → {to_address} | tx={tx_hash.hex()}")
-                    return tx_hash.hex()
+                    h = tx_hash.hex() if hasattr(tx_hash, "hex") else str(tx_hash)
+                    logger.info(f"Gas sent {amount_matic} MATIC → {to_address} | tx={h}")
+                    return h
                 return None
             except Exception as e:
                 logger.exception(f"send_gas_for_sweep error: {e}")
@@ -157,11 +187,12 @@ class PolygonPayService:
                     "chainId": self.chain_id,
                 })
                 signed = deposit_acc.sign_transaction(tx)
-                tx_hash = self.w3.eth.send_raw_transaction(signed.rawTransaction)
+                tx_hash = self.w3.eth.send_raw_transaction(_raw_tx_bytes(signed))
                 receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=180)
                 if receipt.status == 1:
-                    logger.info(f"Swept {amount_usdt} USDT from {deposit_address} | tx={tx_hash.hex()}")
-                    return True, tx_hash.hex(), amount_usdt
+                    h = tx_hash.hex() if hasattr(tx_hash, "hex") else str(tx_hash)
+                    logger.info(f"Swept {amount_usdt} USDT from {deposit_address} | tx={h}")
+                    return True, h, amount_usdt
                 return False, None, amount_usdt
             except Exception as e:
                 logger.exception(f"sweep_usdt error: {e}")
@@ -188,11 +219,12 @@ class PolygonPayService:
                     "chainId": self.chain_id,
                 })
                 signed = self.treasury.sign_transaction(tx)
-                tx_hash = self.w3.eth.send_raw_transaction(signed.rawTransaction)
+                tx_hash = self.w3.eth.send_raw_transaction(_raw_tx_bytes(signed))
                 receipt = self.w3.eth.wait_for_transaction_receipt(tx_hash, timeout=180)
                 if receipt.status == 1:
-                    logger.info(f"Disbursed {amount} USDT → {to_address} | tx={tx_hash.hex()}")
-                    return True, tx_hash.hex(), "OK"
+                    h = tx_hash.hex() if hasattr(tx_hash, "hex") else str(tx_hash)
+                    logger.info(f"Disbursed {amount} USDT → {to_address} | tx={h}")
+                    return True, h, "OK"
                 return False, None, f"TX failed status={receipt.status}"
             except Exception as e:
                 logger.exception(f"disburse_usdt error: {e}")
